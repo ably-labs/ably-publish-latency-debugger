@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -221,13 +222,31 @@ func publish(ctx context.Context, baseURL string, channelName string, log *slog.
 		return err
 	}
 	duration := time.Since(start)
+	var beforeDuration, afterDuration time.Duration
+	if header := res.Header.Get("Ably-Publish-Latency-Debugger-V1"); header != "" {
+		log.Debug("parsing Ably-Publish-Latency-Debugger-V1 header", "header", header)
+		t, err := strconv.ParseInt(header, 10, 64)
+		if err != nil {
+			log.Debug("error parsing Ably-Publish-Latency-Debugger-V1 header", "header", header, "error", err)
+		} else {
+			ablyTime := time.UnixMilli(t)
+			beforeDuration = ablyTime.Sub(start)
+			afterDuration = time.Since(ablyTime)
+		}
+	}
 	server := res.Header.Get("X-Ably-Serverid")
 	cfid := res.Header.Get("X-Amz-Cf-Id")
 	log.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
 
-	publishLatencySeconds.WithLabelValues(baseURL).Observe(duration.Seconds())
+	publishLatencySeconds.WithLabelValues(baseURL, "total").Observe(duration.Seconds())
+	if beforeDuration > 0 {
+		publishLatencySeconds.WithLabelValues(baseURL, "before").Observe(beforeDuration.Seconds())
+	}
+	if afterDuration > 0 {
+		publishLatencySeconds.WithLabelValues(baseURL, "after").Observe(afterDuration.Seconds())
+	}
 	if duration > highLatencyThreshold {
-		log.Warn("received publish response with high latency", "duration", duration, "server", server, "cfid", cfid, "url", url, "body", body)
+		log.Warn("received publish response with high latency", "duration", duration, "before", beforeDuration, "after", afterDuration, "server", server, "cfid", cfid, "body", body)
 	}
 	return nil
 }
@@ -260,14 +279,24 @@ func sendTimeRequest(ctx context.Context, baseURL string) error {
 		log.Error("error sending time request", "status", res.StatusCode, "body", body)
 		return err
 	}
+	ablyTime, err := parseTimeResponse(body, log)
+	if err != nil {
+		log.Error("error decoding time response", "error", err)
+		return err
+	}
+
 	duration := time.Since(start)
+	beforeDuration := ablyTime.Sub(start)
+	afterDuration := time.Since(ablyTime)
 	server := res.Header.Get("X-Ably-Serverid")
 	cfid := res.Header.Get("X-Amz-Cf-Id")
-	log.Debug("received time response", "duration", duration, "server", server, "cfid", cfid, "body", body)
+	log.Debug("received time response", "duration", duration, "before", beforeDuration, "after", afterDuration, "server", server, "cfid", cfid, "body", body)
 
-	timeLatencySeconds.WithLabelValues(baseURL).Observe(duration.Seconds())
+	timeLatencySeconds.WithLabelValues(baseURL, "total").Observe(duration.Seconds())
+	timeLatencySeconds.WithLabelValues(baseURL, "before").Observe(beforeDuration.Seconds())
+	timeLatencySeconds.WithLabelValues(baseURL, "after").Observe(afterDuration.Seconds())
 	if duration > highLatencyThreshold {
-		log.Warn("received time response with high latency", "duration", duration, "server", server, "cfid", cfid, "url", url, "body", body)
+		log.Warn("received time response with high latency", "duration", duration, "before", beforeDuration, "after", afterDuration, "server", server, "cfid", cfid, "body", body)
 	}
 	return nil
 }
@@ -287,6 +316,20 @@ func newClientTrace(start time.Time, log *slog.Logger) *httptrace.ClientTrace {
 			log.Debug("got first response byte", "duration", time.Since(start))
 		},
 	}
+}
+
+func parseTimeResponse(body []byte, log *slog.Logger) (time.Time, error) {
+	var res []int64
+	if err := json.Unmarshal(body, &res); err != nil {
+		log.Error("error decoding time response", "error", err)
+		return time.Time{}, err
+	}
+	if len(res) != 1 {
+		err := fmt.Errorf("unexpected time response: %s", body)
+		log.Error("error decoding time response", "error", err)
+		return time.Time{}, err
+	}
+	return time.UnixMilli(res[0]), nil
 }
 
 // latencyBuckets are exponential histogram buckets which are logarithmically
@@ -327,7 +370,7 @@ var (
 			Help:    "Time spent waiting for publish requests to return a response",
 			Buckets: latencyBuckets,
 		},
-		[]string{"baseURL"},
+		[]string{"baseURL", "trace"},
 	)
 	timeLatencySeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -335,6 +378,6 @@ var (
 			Help:    "Time spent waiting for time requests to return a response",
 			Buckets: latencyBuckets,
 		},
-		[]string{"baseURL"},
+		[]string{"baseURL", "trace"},
 	)
 )
