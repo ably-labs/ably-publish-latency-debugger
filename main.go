@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,9 +112,12 @@ func nextChannelName() string {
 	return fmt.Sprintf("%sably-publish-latency-debugger-%d", channelPrefix, channelNumber.Add(1))
 }
 
-// publish publishes a message to Ably over REST.
+// publish publishes a message to Ably over REST with debugging information
+// in the URL.
 func publish(ctx context.Context, channelName string) error {
-	url := ablyBaseURL + "/channels/" + channelName + "/messages"
+	id := fmt.Sprintf("%016x", rand.Int64())
+	start := time.Now().UTC()
+	url := ablyBaseURL + "/channels/" + channelName + "/messages?ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
 	slog.Debug("publishing message", "channel", channelName, "url", url)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(publishBody))
