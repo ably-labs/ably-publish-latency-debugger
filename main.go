@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"os/signal"
 	"strconv"
@@ -83,7 +84,7 @@ func run(ctx context.Context) error {
 				// blocking the timer
 				go func() {
 					log.Debug("publishing to fixed channel")
-					if err := publish(ctx, fixedChannelName); err != nil {
+					if err := publish(ctx, fixedChannelName, log); err != nil {
 						slog.Error("error publishing to fixed channel", "error", err)
 					}
 				}()
@@ -114,15 +115,19 @@ func nextChannelName() string {
 
 // publish publishes a message to Ably over REST with debugging information
 // in the URL.
-func publish(ctx context.Context, channelName string) error {
+func publish(ctx context.Context, channelName string, log *slog.Logger) error {
 	id := fmt.Sprintf("%016x", rand.Int64())
+	log = log.With("id", id)
+
 	start := time.Now().UTC()
 	url := ablyBaseURL + "/channels/" + channelName + "/messages?ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
-	slog.Debug("publishing message", "channel", channelName, "url", url)
+	log.Debug("publishing message", "url", url)
+
+	ctx = httptrace.WithClientTrace(ctx, newClientTrace(start, log))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(publishBody))
 	if err != nil {
-		slog.Error("error initialising HTTP request", "error", err)
+		log.Error("error initialising HTTP request", "error", err)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -130,20 +135,37 @@ func publish(ctx context.Context, channelName string) error {
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Error("error sending HTTP request", "error", err)
+		log.Error("error sending HTTP request", "error", err)
 		return err
 	}
 	defer res.Body.Close()
 
 	body, _ := io.ReadAll(res.Body)
 	if res.StatusCode != http.StatusCreated {
-		slog.Error("error publishing message", "status", res.StatusCode, "body", body)
+		log.Error("error publishing message", "status", res.StatusCode, "body", body)
 		return err
 	}
 	duration := time.Since(start)
 	server := res.Header.Get("X-Ably-Serverid")
 	cfid := res.Header.Get("X-Amz-Cf-Id")
-	slog.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
+	log.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
 
 	return nil
+}
+
+func newClientTrace(start time.Time, log *slog.Logger) *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			log.Debug("got connection", "duration", time.Since(start), "addr", info.Conn.RemoteAddr(), "reused", info.Reused)
+		},
+		WroteHeaders: func() {
+			log.Debug("wrote headers", "duration", time.Since(start))
+		},
+		WroteRequest: func(_ httptrace.WroteRequestInfo) {
+			log.Debug("wrote request", "duration", time.Since(start))
+		},
+		GotFirstResponseByte: func() {
+			log.Debug("got first response byte", "duration", time.Since(start))
+		},
+	}
 }
