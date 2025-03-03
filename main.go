@@ -113,6 +113,17 @@ func run(ctx context.Context) error {
 		runPublisher(ctx, fixedChannelName, fallbackURL)
 	}()
 
+	// start a goroutine which makes a /time request
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		runTimeRequests(ctx, fixedChannelName, primaryURL)
+	}()
+	go func() {
+		defer wg.Done()
+		runTimeRequests(ctx, fixedChannelName, fallbackURL)
+	}()
+
 	// TODO: start random channel publisher
 	// TODO: start request token publisher
 
@@ -140,6 +151,29 @@ func runPublisher(ctx context.Context, channelName string, baseURL string) {
 			timer.Reset(interval)
 		case <-ctx.Done():
 			log.Info("stopping fixed channel publisher")
+			return
+		}
+	}
+}
+
+func runTimeRequests(ctx context.Context, channelName string, baseURL string) {
+	slog.Info("starting time requests", "baseURL", baseURL)
+
+	timer := time.NewTimer(interval)
+	for {
+		select {
+		case <-timer.C:
+			// run the request in a goroutine to avoid
+			// blocking the timer
+			go func() {
+				slog.Debug("sending time request")
+				if err := sendTimeRequest(ctx, baseURL); err != nil {
+					slog.Error("error sending time request", "error", err)
+				}
+			}()
+			timer.Reset(interval)
+		case <-ctx.Done():
+			slog.Info("stopping fixed channel publisher")
 			return
 		}
 	}
@@ -198,6 +232,46 @@ func publish(ctx context.Context, baseURL string, channelName string, log *slog.
 	return nil
 }
 
+func sendTimeRequest(ctx context.Context, baseURL string) error {
+	id := fmt.Sprintf("%016x", rand.Int64())
+	log := slog.With("id", id)
+
+	start := time.Now().UTC()
+	url := baseURL + "/time?ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
+	log.Debug("sending time request", "url", url)
+
+	ctx = httptrace.WithClientTrace(ctx, newClientTrace(start, log))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		log.Error("error initialising HTTP request", "error", err)
+		return err
+	}
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Error("error sending HTTP request", "error", err)
+		return err
+	}
+	defer res.Body.Close()
+
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		log.Error("error sending time request", "status", res.StatusCode, "body", body)
+		return err
+	}
+	duration := time.Since(start)
+	server := res.Header.Get("X-Ably-Serverid")
+	cfid := res.Header.Get("X-Amz-Cf-Id")
+	log.Debug("received time response", "duration", duration, "server", server, "cfid", cfid, "body", body)
+
+	timeLatencySeconds.WithLabelValues(baseURL).Observe(duration.Seconds())
+	if duration > highLatencyThreshold {
+		log.Warn("received time response with high latency", "duration", duration, "server", server, "cfid", cfid, "url", url, "body", body)
+	}
+	return nil
+}
+
 func newClientTrace(start time.Time, log *slog.Logger) *httptrace.ClientTrace {
 	return &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
@@ -251,6 +325,14 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "publish_latency_seconds",
 			Help:    "Time spent waiting for publish requests to return a response",
+			Buckets: latencyBuckets,
+		},
+		[]string{"baseURL"},
+	)
+	timeLatencySeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "time_latency_seconds",
+			Help:    "Time spent waiting for time requests to return a response",
 			Buckets: latencyBuckets,
 		},
 		[]string{"baseURL"},
