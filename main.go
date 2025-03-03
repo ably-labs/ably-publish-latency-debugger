@@ -31,7 +31,10 @@ var (
 	apiKeyBase64 string
 )
 
-const publishBody = `{"name":"ably-publish-latency-debugger","data":"this is a test from ably-publish-latency-debugger"}`
+const (
+	highLatencyThreshold = 100 * time.Millisecond
+	publishBody          = `{"name":"ably-publish-latency-debugger","data":"this is a test from ably-publish-latency-debugger"}`
+)
 
 func main() {
 	// stop on SIGINT or SIGTERM
@@ -150,6 +153,9 @@ func publish(ctx context.Context, channelName string, log *slog.Logger) error {
 	cfid := res.Header.Get("X-Amz-Cf-Id")
 	log.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
 
+	if duration > highLatencyThreshold {
+		log.Warn("received publish response with high latency", "duration", duration, "server", server, "cfid", cfid, "body", body)
+	}
 	return nil
 }
 
