@@ -23,6 +23,7 @@ var (
 	apiKey        = os.Getenv("ABLY_API_KEY")
 	channelPrefix = os.Getenv("ABLY_CHANNEL_PREFIX")
 	endpoint      = os.Getenv("ABLY_ENDPOINT")
+	verbose       = os.Getenv("VERBOSE") != ""
 
 	apiKeyBase64 string
 )
@@ -33,6 +34,11 @@ func main() {
 	// stop on SIGINT or SIGTERM
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// enable debug logs if VERBOSE is set
+	if verbose {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
 
 	// run until stopped
 	if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
