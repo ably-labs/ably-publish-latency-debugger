@@ -28,7 +28,8 @@ import (
 )
 
 var (
-	ablyBaseURL   = cmp.Or(os.Getenv("ABLY_BASE_URL"), "https://rest.ably.io")
+	primaryURL    = cmp.Or(os.Getenv("ABLY_PRIMARY_URL"), "https://rest.ably.io")
+	fallbackURL   = cmp.Or(os.Getenv("ABLY_FALLBACK_URL"), "https://global.a.fallback.main.cluster.ably-realtime.com")
 	apiKey        = os.Getenv("ABLY_API_KEY")
 	channelPrefix = os.Getenv("ABLY_CHANNEL_PREFIX")
 	endpoint      = os.Getenv("ABLY_ENDPOINT")
@@ -81,9 +82,12 @@ func run(ctx context.Context) error {
 	// auth header
 	apiKeyBase64 = base64.StdEncoding.EncodeToString([]byte(apiKey))
 
-	// make sure ablyBaseURL doesn't have a slash at the end
-	if strings.HasSuffix(ablyBaseURL, "/") {
-		ablyBaseURL = strings.TrimSuffix(ablyBaseURL, "/")
+	// make sure urls don't have slashes at the end
+	if strings.HasSuffix(primaryURL, "/") {
+		primaryURL = strings.TrimSuffix(primaryURL, "/")
+	}
+	if strings.HasSuffix(fallbackURL, "/") {
+		fallbackURL = strings.TrimSuffix(fallbackURL, "/")
 	}
 
 	slog.Info("starting metrics server", "port", metricsPort)
@@ -99,30 +103,14 @@ func run(ctx context.Context) error {
 
 	// start a goroutine which publishes to a fixed channel
 	fixedChannelName := nextChannelName()
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		log := slog.With("channel", fixedChannelName)
-		log.Info("starting fixed channel publisher")
-
-		timer := time.NewTimer(interval)
-		for {
-			select {
-			case <-timer.C:
-				// run the publish in a goroutine to avoid
-				// blocking the timer
-				go func() {
-					log.Debug("publishing to fixed channel")
-					if err := publish(ctx, fixedChannelName, log); err != nil {
-						slog.Error("error publishing to fixed channel", "error", err)
-					}
-				}()
-				timer.Reset(interval)
-			case <-ctx.Done():
-				log.Info("stopping fixed channel publisher")
-				return
-			}
-		}
+		runPublisher(ctx, fixedChannelName, primaryURL)
+	}()
+	go func() {
+		defer wg.Done()
+		runPublisher(ctx, fixedChannelName, fallbackURL)
 	}()
 
 	// TODO: start random channel publisher
@@ -131,6 +119,30 @@ func run(ctx context.Context) error {
 	wg.Wait()
 	slog.Info("exiting")
 	return nil
+}
+
+func runPublisher(ctx context.Context, channelName string, baseURL string) {
+	log := slog.With("channel", channelName)
+	log.Info("starting fixed channel publisher", "baseURL", baseURL)
+
+	timer := time.NewTimer(interval)
+	for {
+		select {
+		case <-timer.C:
+			// run the publish in a goroutine to avoid
+			// blocking the timer
+			go func() {
+				log.Debug("publishing to fixed channel")
+				if err := publish(ctx, baseURL, channelName, log); err != nil {
+					slog.Error("error publishing to fixed channel", "error", err)
+				}
+			}()
+			timer.Reset(interval)
+		case <-ctx.Done():
+			log.Info("stopping fixed channel publisher")
+			return
+		}
+	}
 }
 
 // channelNumber is used to assign an incremeting number to each channel.
@@ -144,12 +156,12 @@ func nextChannelName() string {
 
 // publish publishes a message to Ably over REST with debugging information
 // in the URL.
-func publish(ctx context.Context, channelName string, log *slog.Logger) error {
+func publish(ctx context.Context, baseURL string, channelName string, log *slog.Logger) error {
 	id := fmt.Sprintf("%016x", rand.Int64())
 	log = log.With("id", id)
 
 	start := time.Now().UTC()
-	url := ablyBaseURL + "/channels/" + channelName + "/messages?ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
+	url := baseURL + "/channels/" + channelName + "/messages?ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
 	log.Debug("publishing message", "url", url)
 
 	ctx = httptrace.WithClientTrace(ctx, newClientTrace(start, log))
@@ -179,9 +191,9 @@ func publish(ctx context.Context, channelName string, log *slog.Logger) error {
 	cfid := res.Header.Get("X-Amz-Cf-Id")
 	log.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
 
-	publishLatencySeconds.Observe(duration.Seconds())
+	publishLatencySeconds.WithLabelValues(baseURL).Observe(duration.Seconds())
 	if duration > highLatencyThreshold {
-		log.Warn("received publish response with high latency", "duration", duration, "server", server, "cfid", cfid, "body", body)
+		log.Warn("received publish response with high latency", "duration", duration, "server", server, "cfid", cfid, "url", url, "body", body)
 	}
 	return nil
 }
@@ -235,11 +247,12 @@ var latencyBuckets = prometheus.ExponentialBuckets(
 )
 
 var (
-	publishLatencySeconds = promauto.NewHistogram(
+	publishLatencySeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "publish_latency_seconds",
 			Help:    "Time spent waiting for publish requests to return a response",
 			Buckets: latencyBuckets,
 		},
+		[]string{"baseURL"},
 	)
 )
