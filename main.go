@@ -140,7 +140,10 @@ func publish(ctx context.Context, channelName string) error {
 		slog.Error("error publishing message", "status", res.StatusCode, "body", body)
 		return err
 	}
-	slog.Debug("received publish response", "body", body)
+	duration := time.Since(start)
+	server := res.Header.Get("X-Ably-Serverid")
+	cfid := res.Header.Get("X-Amz-Cf-Id")
+	slog.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
 
 	return nil
 }
