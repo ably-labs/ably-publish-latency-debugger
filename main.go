@@ -32,10 +32,12 @@ var (
 	apiKey        = os.Getenv("ABLY_API_KEY")
 	channelPrefix = os.Getenv("ABLY_CHANNEL_PREFIX")
 	endpoint      = os.Getenv("ABLY_ENDPOINT")
+	intervalEnv   = cmp.Or(os.Getenv("PUBLISH_INTERVAL"), "1s")
 	verbose       = os.Getenv("VERBOSE") != ""
 	metricsPort   = cmp.Or(os.Getenv("METRICS_PORT"), "3000")
 
 	apiKeyBase64 string
+	interval     time.Duration
 )
 
 const (
@@ -67,6 +69,14 @@ func run(ctx context.Context) error {
 		return errors.New("missing ABLY_API_KEY environment variable")
 	}
 
+	var err error
+	interval, err = time.ParseDuration(intervalEnv)
+	if err != nil {
+		slog.Error("error parsing PUBLISH_INTERVAL environment variable", "error", err)
+		return err
+	}
+	slog.Info("set publish interval", "interval", interval)
+
 	// cache the base64 encoding of the API key to be used in the basic
 	// auth header
 	apiKeyBase64 = base64.StdEncoding.EncodeToString([]byte(apiKey))
@@ -95,7 +105,7 @@ func run(ctx context.Context) error {
 		log := slog.With("channel", fixedChannelName)
 		log.Info("starting fixed channel publisher")
 
-		timer := time.NewTimer(time.Second)
+		timer := time.NewTimer(interval)
 		for {
 			select {
 			case <-timer.C:
@@ -107,7 +117,7 @@ func run(ctx context.Context) error {
 						slog.Error("error publishing to fixed channel", "error", err)
 					}
 				}()
-				timer.Reset(time.Second)
+				timer.Reset(interval)
 			case <-ctx.Done():
 				log.Info("stopping fixed channel publisher")
 				return
