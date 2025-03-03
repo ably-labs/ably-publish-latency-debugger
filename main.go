@@ -195,7 +195,7 @@ func publish(ctx context.Context, baseURL string, channelName string, log *slog.
 	log = log.With("id", id)
 
 	start := time.Now().UTC()
-	url := baseURL + "/channels/" + channelName + "/messages?ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
+	url := baseURL + "/channels/" + channelName + "/messages?quickAck=true&ably-publish-latency-debugger=id:" + id + ",start:" + strconv.FormatInt(start.UnixMicro(), 10)
 	log.Debug("publishing message", "url", url)
 
 	ctx = httptrace.WithClientTrace(ctx, newClientTrace(start, log))
