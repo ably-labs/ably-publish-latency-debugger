@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"os"
@@ -19,6 +21,10 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -27,6 +33,7 @@ var (
 	channelPrefix = os.Getenv("ABLY_CHANNEL_PREFIX")
 	endpoint      = os.Getenv("ABLY_ENDPOINT")
 	verbose       = os.Getenv("VERBOSE") != ""
+	metricsPort   = cmp.Or(os.Getenv("METRICS_PORT"), "3000")
 
 	apiKeyBase64 string
 )
@@ -68,6 +75,15 @@ func run(ctx context.Context) error {
 	if strings.HasSuffix(ablyBaseURL, "/") {
 		ablyBaseURL = strings.TrimSuffix(ablyBaseURL, "/")
 	}
+
+	slog.Info("starting metrics server", "port", metricsPort)
+	ln, err := net.Listen("tcp", ":"+metricsPort)
+	if err != nil {
+		slog.Error("error starting metrics server", "error", err)
+		return err
+	}
+	defer ln.Close()
+	go func() { http.Serve(ln, promhttp.Handler()) }()
 
 	var wg sync.WaitGroup
 
@@ -153,6 +169,7 @@ func publish(ctx context.Context, channelName string, log *slog.Logger) error {
 	cfid := res.Header.Get("X-Amz-Cf-Id")
 	log.Debug("received publish response", "duration", duration, "server", server, "cfid", cfid, "body", body)
 
+	publishLatencySeconds.Observe(duration.Seconds())
 	if duration > highLatencyThreshold {
 		log.Warn("received publish response with high latency", "duration", duration, "server", server, "cfid", cfid, "body", body)
 	}
@@ -175,3 +192,44 @@ func newClientTrace(start time.Time, log *slog.Logger) *httptrace.ClientTrace {
 		},
 	}
 }
+
+// latencyBuckets are exponential histogram buckets which are logarithmically
+// spaced to cover both small and large latencies.
+//
+// They use a factor of 16th root of 10 so that each 16th successive boundary
+// is a power of 10 (i.e. 1ms, 10ms, 100ms, 1s, 10s), which is useful for
+// accurate counts of latencies below those human friendly boundaries.
+//
+// Here's the list of bucket boundaries this generates:
+//
+// 1.000ms  10.00ms  100.0ms  1.000s  10.00s
+// 1.155ms  11.55ms  115.5ms  1.155s
+// 1.334ms  13.34ms  133.4ms  1.334s
+// 1.540ms  15.40ms  154.0ms  1.540s
+// 1.778ms  17.78ms  177.8ms  1.778s
+// 2.054ms  20.54ms  205.4ms  2.054s
+// 2.371ms  23.71ms  237.1ms  2.371s
+// 2.738ms  27.38ms  273.8ms  2.738s
+// 3.162ms  31.62ms  316.2ms  3.162s
+// 3.652ms  36.52ms  365.2ms  3.652s
+// 4.217ms  42.17ms  421.7ms  4.217s
+// 4.870ms  48.70ms  487.0ms  4.870s
+// 5.623ms  56.23ms  562.3ms  5.623s
+// 6.494ms  64.94ms  649.4ms  6.494s
+// 7.499ms  74.99ms  749.9ms  7.499s
+// 8.660ms  86.60ms  866.0ms  8.660s
+var latencyBuckets = prometheus.ExponentialBuckets(
+	0.001,
+	math.Pow(10, float64(1)/16),
+	65,
+)
+
+var (
+	publishLatencySeconds = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "publish_latency_seconds",
+			Help:    "Time spent waiting for publish requests to return a response",
+			Buckets: latencyBuckets,
+		},
+	)
+)
