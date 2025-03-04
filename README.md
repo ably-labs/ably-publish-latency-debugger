@@ -60,6 +60,20 @@ When a request takes longer than 100ms, the program outputs a WARN log like the 
 
 When working with the Ably support team to investigate high latency, please provide these warning logs.
 
+## Docker
+
+This repository contains a Dockerfile which can be used to compile the program into a Docker image:
+
+```
+$ docker build -t ably-publish-latency-debugger .
+```
+
+Run it with your Ably API key and exposing port 3000 to access the metrics server:
+
+```
+$ docker run -it --rm --name ably-publish-latency-debugger -e ABLY_API_KEY="xxx.yyy:zzz" -p 3000:3000 ably-publish-latency-debugger
+```
+
 ## Metrics
 
 The program starts a metrics server on port 3000 (or the port specified in the `METRICS_PORT`
