@@ -68,7 +68,7 @@ func run(ctx context.Context) error {
 	slog.Info("checking ABLY_API_KEY is set")
 	if apiKey == "" {
 		slog.Error("missing ABLY_API_KEY environment variable")
-		return errors.New("missing ABLY_API_KEY environment variable")
+		// return errors.New("missing ABLY_API_KEY environment variable")
 	}
 
 	var err error
@@ -104,26 +104,26 @@ func run(ctx context.Context) error {
 
 	// start a goroutine which publishes to a fixed channel
 	fixedChannelName := nextChannelName()
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		runPublisher(ctx, fixedChannelName, primaryURL)
-	}()
-	go func() {
-		defer wg.Done()
-		runPublisher(ctx, fixedChannelName, fallbackURL)
-	}()
+	// wg.Add(2)
+	// go func() {
+	// 	defer wg.Done()
+	// 	runPublisher(ctx, fixedChannelName, primaryURL)
+	// }()
+	// go func() {
+	// 	defer wg.Done()
+	// 	runPublisher(ctx, fixedChannelName, fallbackURL)
+	// }()
 
 	// start a goroutine which makes a /time request
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		runTimeRequests(ctx, fixedChannelName, primaryURL)
 	}()
-	go func() {
-		defer wg.Done()
-		runTimeRequests(ctx, fixedChannelName, fallbackURL)
-	}()
+	// go func() {
+	// 	defer wg.Done()
+	// 	runTimeRequests(ctx, fixedChannelName, fallbackURL)
+	// }()
 
 	// TODO: start random channel publisher
 	// TODO: start request token publisher
